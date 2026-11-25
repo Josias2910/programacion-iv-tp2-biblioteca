@@ -1,9 +1,10 @@
 from datetime import date, timedelta
 
 from fastapi import HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-from app.models import Libro, Prestamo, PrestamoCreate, Socio
+from app.models import Prestamo, PrestamoCreate
+from app.repositories import libros, prestamos, socios
 
 
 def hoy() -> date:
@@ -11,18 +12,14 @@ def hoy() -> date:
 
 
 def registrar_prestamo(session: Session, datos: PrestamoCreate) -> Prestamo:
-    socio = session.get(Socio, datos.socio_id)
-    libro = session.get(Libro, datos.libro_id)
+    socio = socios.obtener(session, datos.socio_id)
+    libro = libros.obtener(session, datos.libro_id)
     if socio is None or libro is None:
         raise HTTPException(404, "Socio o libro inexistente")
     if not socio.activo:
         raise HTTPException(403, "El socio está inactivo")
 
-    activos = session.exec(
-        select(Prestamo).where(
-            Prestamo.socio_id == socio.id, Prestamo.fecha_devolucion.is_(None)
-        )
-    ).all()
+    activos = prestamos.listar_del_socio(session, datos.socio_id, activos=True)
     if len(activos) >= 3:
         raise HTTPException(409, "El socio ya tiene tres préstamos activos")
     if libro.stock == 0:
@@ -36,26 +33,19 @@ def registrar_prestamo(session: Session, datos: PrestamoCreate) -> Prestamo:
         fecha_vencimiento=fecha + timedelta(days=14),
     )
     libro.stock -= 1
-    session.add(libro)
-    session.add(prestamo)
-    session.commit()
-    session.refresh(prestamo)
-    return prestamo
+    return prestamos.guardar_con_stock(session, prestamo, libro)
 
 
 def registrar_devolucion(session: Session, prestamo_id: int) -> Prestamo:
-    prestamo = session.get(Prestamo, prestamo_id)
+    prestamo = prestamos.obtener(session, prestamo_id)
     if prestamo is None:
         raise HTTPException(404, "Préstamo inexistente")
     if prestamo.fecha_devolucion is not None:
         raise HTTPException(409, "El préstamo ya fue devuelto")
 
+    libro = prestamos.libro_del_prestamo(prestamo)
     prestamo.fecha_devolucion = hoy()
     atraso = max(0, (prestamo.fecha_devolucion - prestamo.fecha_vencimiento).days)
     prestamo.multa = atraso * 100
-    prestamo.libro.stock += 1
-    session.add(prestamo.libro)
-    session.add(prestamo)
-    session.commit()
-    session.refresh(prestamo)
-    return prestamo
+    libro.stock += 1
+    return prestamos.guardar_con_stock(session, prestamo, libro)

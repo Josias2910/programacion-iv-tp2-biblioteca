@@ -1,30 +1,26 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.database import get_session
-from app.models import Libro, LibroBase, LibroRead, Prestamo
+from app.models import Libro, LibroBase, LibroRead
+from app.repositories import libros, prestamos
 from app.routers.autores import buscar_autor
 
 router = APIRouter(prefix="/libros", tags=["Libros"])
 
 
 def buscar_libro(session: Session, libro_id: int) -> Libro:
-    libro = session.get(Libro, libro_id)
+    libro = libros.obtener(session, libro_id)
     if libro is None:
         raise HTTPException(404, "Libro inexistente")
     return libro
 
 
 def guardar_libro(session: Session, libro: Libro):
-    session.add(libro)
     try:
-        session.commit()
-    except IntegrityError:
-        session.rollback()
+        return libros.guardar(session, libro)
+    except libros.ISBNRepetido:
         raise HTTPException(409, "Ya existe un libro con ese ISBN")
-    session.refresh(libro)
-    return libro
 
 
 @router.post("", response_model=LibroRead, status_code=201)
@@ -34,12 +30,7 @@ def crear_libro(datos: LibroBase, session: Session = Depends(get_session)):
 
 @router.get("", response_model=list[LibroRead])
 def listar_libros(disponibles: bool | None = None, session: Session = Depends(get_session)):
-    consulta = select(Libro).order_by(Libro.id)
-    if disponibles is True:
-        consulta = consulta.where(Libro.stock > 0)
-    elif disponibles is False:
-        consulta = consulta.where(Libro.stock == 0)
-    return session.exec(consulta).all()
+    return libros.listar(session, disponibles)
 
 
 @router.get("/{libro_id}", response_model=LibroRead)
@@ -57,10 +48,9 @@ def modificar_libro(libro_id: int, datos: LibroBase, session: Session = Depends(
 @router.delete("/{libro_id}", status_code=204)
 def eliminar_libro(libro_id: int, session: Session = Depends(get_session)):
     libro = buscar_libro(session, libro_id)
-    if session.exec(select(Prestamo).where(Prestamo.libro_id == libro_id)).first():
+    if prestamos.existe_para_libro(session, libro_id):
         raise HTTPException(409, "No se puede eliminar un libro con préstamos registrados")
-    session.delete(libro)
-    session.commit()
+    libros.eliminar(session, libro)
     return Response(status_code=204)
 
 
@@ -68,10 +58,6 @@ def eliminar_libro(libro_id: int, session: Session = Depends(get_session)):
 def asociar_autor(libro_id: int, autor_id: int, session: Session = Depends(get_session)):
     libro = buscar_libro(session, libro_id)
     autor = buscar_autor(session, autor_id)
-    if autor in libro.autores:
+    if not libros.asociar_autor(session, libro, autor):
         raise HTTPException(409, "El autor ya está asociado al libro")
-    libro.autores.append(autor)
-    session.add(libro)
-    session.commit()
-    session.refresh(libro)
     return libro
